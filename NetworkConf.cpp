@@ -1,0 +1,516 @@
+﻿#include <QDebug>
+#include "NetworkConf.h"
+#include "Socket.h"
+#include "TStringUtil.h"
+#include "TFileUtil.h"
+#include "Path.h"
+
+#include "AppConst.h"
+#include "CLog.h"
+#include "IniFile.h"
+#include "IniFileUtil.h"
+#include "AppConfigUtil.h"
+#include "AppConfig.h"
+
+const char* NetworkConf::FILE_NAME = "network.conf";
+
+static const char* INTERFACE_LO = "lo";
+
+static const char* INTERFACE_AUX = "aux";
+
+
+
+bool NetworkConf::getMacAddr(const QString& ifname, QString& mac)
+{
+    std::string value;
+    bool found = net::getMacAddr(qPrintable(ifname), value);
+    mac = QString::fromStdString(value);
+    return found;
+}
+
+std::string NetworkConf::getAuxInterface()
+{
+    return "eth1";
+}
+
+
+net::NetConfig NetworkConf::convert(const NetworkConfig& config)
+{
+    net::NetConfig obj = net::NetConfig();
+    obj.ifname = config.ifname.toStdString();
+    obj.ip = config.ip.toStdString();
+    obj.mask = config.mask.toStdString();
+    obj.gateway = config.gate.toStdString();
+    obj.dhcp = config.dhcp;
+
+    return obj;
+}
+
+NetworkConfig NetworkConf::convert(const net::NetConfig& config)
+{
+    NetworkConfig obj = NetworkConfig();
+    obj.ifname = QString::fromStdString(config.ifname);
+    obj.ip = QString::fromStdString(config.ip);
+    obj.mask = QString::fromStdString(config.mask);
+    obj.gate = QString::fromStdString(config.gateway);
+    obj.dhcp = config.dhcp;
+    return obj;
+}
+
+
+
+NetworkConf::NetworkConf()
+{
+}
+
+bool NetworkConf::load()
+{
+    bool ret = true;
+    m_configs.clear();
+    m_auxAddrs.clear();
+
+    std::string filepath = getConfPath();
+    comn::IniFile iniFile;
+    if (iniFile.load(filepath.c_str()))
+    {
+        for (size_t i = 0; i < iniFile.getSectionCount(); ++ i)
+        {
+            comn::IniFile::IniSection& section = iniFile.getSection(i);
+            if (section.name == INTERFACE_AUX)
+            {
+                continue;
+            }
+
+            NetworkConfig networkConfig;
+            networkConfig.ifname = QString::fromStdString(section.name);
+            qDebug("==============networkConfig name :%s",section.name.c_str());
+            IniFileUtil::queryValue(section, "IPADDRESS", networkConfig.ip);
+            IniFileUtil::queryValue(section, "NETMASK", networkConfig.mask);
+            IniFileUtil::queryValue(section, "GATE", networkConfig.gate);
+            qDebug("ip:%s,netmask:%s,gate:%s\n",qPrintable(networkConfig.ip),qPrintable(networkConfig.mask),qPrintable(networkConfig.gate));
+            section.get("DHCP", networkConfig.dhcp);
+
+            m_configs.push_back(networkConfig);
+        }
+
+        {
+            comn::IniFile::IniSection& section = iniFile.ensure(INTERFACE_AUX);
+            for (int i = 0; i < MAX_AUX_ADDR; i ++)
+            {
+                std::string key = comn::StringCast::toString(i);
+                std::string value;
+                if (section.get(key.c_str(), value))
+                {
+                    std::string ip;
+                    std::string mask;
+                    comn::StringUtil::split(value, '/', ip, mask);
+
+                    AuxNetworkAddr addr;
+                    addr.ip = QString::fromStdString(ip);
+                    addr.mask = QString::fromStdString(mask);
+                    m_auxAddrs.push_back(addr);
+                }
+            }
+        }
+    }
+    else
+    {
+        qDebug("===========can not find netconfig !!!!");
+        ret = false;
+        net::StringArray names;
+        net::enumNetInterface(names);
+
+        for (size_t i = 0; i < names.size(); ++ i)
+        {
+            std::string ifname = names[i];
+            net::NetConfig config = net::NetConfig();
+            net::getNetConfig(ifname.c_str(), config);
+
+            NetworkConfig networkConfig;
+            networkConfig.ifname = QString::fromStdString(ifname);
+            networkConfig.dhcp = config.dhcp;
+            networkConfig.ip = QString::fromStdString(config.ip);
+            networkConfig.mask = QString::fromStdString(config.mask);
+            networkConfig.gate = QString::fromStdString(config.gateway);
+
+            m_configs.push_back(networkConfig);
+        }
+    }
+    if(m_configs.size()==0)
+        ret = false;
+    return ret;
+}
+
+bool NetworkConf::save() const
+{
+    comn::IniFile iniFile;
+
+    for (size_t i = 0; i < m_configs.size(); ++ i)
+    {
+        const NetworkConfig& config = m_configs[i];
+        std::string name = config.ifname.toStdString();
+        iniFile.setValue(name.c_str(), "DHCP", config.dhcp);
+        IniFileUtil::setValue(iniFile, name.c_str(), "IPADDRESS", config.ip);
+        IniFileUtil::setValue(iniFile, name.c_str(), "NETMASK", config.mask);
+        IniFileUtil::setValue(iniFile, name.c_str(), "GATE", config.gate);
+
+        saveScript(config);
+    }
+
+    for (size_t i = 0; i < m_auxAddrs.size(); ++ i)
+    {
+        const AuxNetworkAddr& addr = m_auxAddrs[i];
+        QString text = addr.ip;
+        text += "/";
+        text += addr.mask;
+        std::string key = comn::StringCast::toString(i);
+        iniFile.setValue(INTERFACE_AUX, key.c_str(), text.toStdString());
+    }
+
+    saveAuxScript();
+
+    std::string filepath = getConfPath();
+    bool done = iniFile.save(filepath.c_str());
+
+    return done;
+}
+
+bool NetworkConf::check(const NetworkConfig& networkConfig) const
+{
+    return !networkConfig.ip.isEmpty() && !networkConfig.gate.isEmpty();
+}
+
+bool NetworkConf::apply()
+{
+	//dump();
+	
+    bool done = true;
+    for (size_t i = 0; i < m_configs.size(); ++ i)
+    {
+        done &= checkApply(m_configs[i]);
+    }
+
+    //applyAuxAddrs();
+
+    return done;
+}
+
+bool NetworkConf::applycard(int i)
+{
+    //dump();
+
+    bool done = true;
+    done &= checkApply(m_configs[i]);
+    //applyAuxAddrs();
+
+    return done;
+}
+
+bool NetworkConf::checkApply(const NetworkConfig& networkConfig)
+{
+    std::string ifname = networkConfig.ifname.toStdString();
+    //if (isConfigChanged(ifname, networkConfig))
+    {
+        net::NetConfig config = net::NetConfig();
+        config.dhcp = networkConfig.dhcp;
+        config.ip = networkConfig.ip.toStdString();
+        config.mask = networkConfig.mask.toStdString();
+        config.gateway = networkConfig.gate.toStdString();
+
+        qDebug("%s: ip: %s, mask: %s, gate: %s\n", ifname.c_str(), config.ip.c_str(), config.mask.c_str(), config.gateway.c_str());
+
+        return net::setNetConfig(ifname.c_str(), config);
+    }
+    return true;
+}
+
+std::string NetworkConf::getConfPath()
+{
+    return comn::Path::join(AppConst::getEtcDir().toStdString(), FILE_NAME);
+}
+
+std::string NetworkConf::getScriptPath(const std::string& ifname)
+{
+    return comn::Path::join(AppConst::getEtcDir().toStdString(), ifname);
+}
+
+std::string NetworkConf::getAuxScriptPath()
+{
+    return getScriptPath(INTERFACE_AUX);
+}
+
+bool NetworkConf::saveAuxScript() const
+{
+    std::string ifname = getAuxIfName();
+
+    std::string text = "#!/bin/sh\n";
+
+    for (size_t i = 0; i < m_auxAddrs.size(); ++ i)
+    {
+        const AuxNetworkAddr& addr = m_auxAddrs[i];
+        std::string name = comn::StringUtil::format("%s:%d", ifname.c_str(), i);
+        text += comn::StringUtil::format("ifconfig %s %s netmask %s up\n", name.c_str(), qPrintable(addr.ip), qPrintable(addr.mask));
+    }
+
+    std::string filePath = getAuxScriptPath();
+    return comn::FileUtil::write(text.c_str(), text.size(), filePath.c_str(), false);
+}
+
+bool NetworkConf::saveScript(const NetworkConfig& networkConfig) const
+{
+    std::string ifname = networkConfig.ifname.toStdString();
+
+    std::string text = "#!/bin/sh\n";
+    if(networkConfig.dhcp)
+    {
+        //QString cmd = QString("/sbin/udhcpc -i %1").arg(m_ifname.c_str());
+        qDebug() << "====================saveScript";
+        text += comn::StringUtil::format("/sbin/udhcpc -i %s  &\n", ifname.c_str());
+    }
+    else
+    {
+        //text += comn::StringUtil::format("ifconfig %s down\n", ifname.c_str());
+        text += comn::StringUtil::format("ifconfig %s %s netmask %s up\n", ifname.c_str(), qPrintable(networkConfig.ip), qPrintable(networkConfig.mask));
+        text += comn::StringUtil::format("route add default gw %s dev %s\n", qPrintable(networkConfig.gate), ifname.c_str());
+        //text += "ifconfig eth0 up\n";
+    }
+    std::string str = text;
+    std::string filePath = getScriptPath(ifname);
+    return comn::FileUtil::write(str.c_str(), str.size(), filePath.c_str(), false);
+}
+
+void NetworkConf::execute()
+{
+    //
+#ifdef WIN32
+    return;
+#endif //
+
+    qDebug("net interface:%d",m_configs.size());
+    for (size_t i = 0; i < m_configs.size(); ++ i)
+    {
+        const NetworkConfig& networkConfig = m_configs[i];
+        std::string ifname = networkConfig.ifname.toStdString();
+
+        if (!isConfigChanged(ifname, networkConfig))
+        {
+            continue;
+        }
+
+        std::string filePath = getScriptPath(ifname);
+        if (!comn::Path::exist(filePath))
+        {
+            return;
+        }
+
+        std::string cmd = comn::StringUtil::format("sh %s &", filePath.c_str());
+        qDebug("%s",cmd.c_str());
+        //if(mid == 0)
+        system(cmd.c_str());
+    }
+
+    std::string filePath = getAuxScriptPath();
+    if (comn::Path::exist(filePath))
+    {
+        std::string cmd = comn::StringUtil::format("sh %s &", filePath.c_str());
+        qDebug("%s",cmd.c_str());
+        system(cmd.c_str());
+    }
+    QString name;
+    QString passwd;
+    QString ip;
+    QString netmask;
+    QString gateway;
+    QString dns;
+    QString cmd;
+    int wifiDhcp;
+    int mid;
+    AppConfig::get("Network/NET", mid);
+    AppConfig::get("Network/dhcp", wifiDhcp);
+    AppConfigUtil::loadWifiInfo(name,passwd);
+    if(mid == 1)
+    {
+        if(wifiDhcp)
+        {
+            cmd = QString("sleep 3;ip route del default;killall udhcpc;sleep 1;/userdata/etc/wifi_setup.sh -i %1 -p %2").arg(name).arg(passwd);
+            qDebug("%s",qPrintable(cmd));
+        }
+        else
+        {
+            AppConfig::get("Network/ip", ip);
+            AppConfig::get("Network/netmask", netmask);
+            AppConfig::get("Network/gateway", gateway);
+            AppConfig::get("Network/dns", dns);
+            cmd = QString("sleep 3;ip route del default;killall udhcpc;sleep 1;/userdata/etc/wifi_setup.sh -i %1 -p %2 -a %3 -m %4 -g %5 -n %6").arg(name).arg(passwd).arg(ip).arg(netmask).arg(gateway).arg(dns);
+            qDebug("%s",qPrintable(cmd));
+        }
+        //if(mid == 1)
+        system(cmd.toUtf8().data());
+        return;
+    }
+    char* ccmd="";
+//    if(mid == 0)
+//    {
+//        ccmd = "killall udhcpc;sleep 1;udhcpc -i eth1 &";
+//    }
+//    else
+//    if(mid == 1)
+//    {
+//        ccmd = "sleep 1;killall udhcpc;sleep 1;udhcpc -i wlan0 &";
+//    }
+//    else
+    if(mid == 2)
+    {
+        qDebug() << "====================execute";
+        qDebug("====================execute");
+        ccmd = "sleep 3;ip route del default;killall udhcpc;sleep 1;udhcpc -i usb0 &";
+    }
+    else if(mid == 3)
+    {
+        qDebug() <<"====================execute1";
+        qDebug("====================execute1");
+        ccmd = "sleep 3;ip route del default;killall udhcpc;sleep 10;ifconfig pcie0 up;ifconfig sipa_dummy0 up;udhcpc -i pcie0 &";
+    }
+    else
+        return;
+    //system("killall udhcpc");
+    system(ccmd);
+}
+
+bool NetworkConf::isConfigChanged(const std::string& ifname, const NetworkConfig& networkConfig)
+{
+	//CLog::info("isConfigChanged. ifname: %s\n", ifname.c_str());
+	
+    net::NetConfig config = net::NetConfig();
+    net::getNetConfig(ifname.c_str(), config);
+    qDebug("get eth name :%s",ifname.c_str());
+	//CLog::info("getNetConfig. \n");
+    bool changed = false;
+//    if(config.dhcp == 1)
+//    {
+//        changed = false;
+//    }
+//    else
+        if (config.ip != networkConfig.ip.toStdString() ||
+            config.mask != networkConfig.mask.toStdString() ||
+            config.gateway != networkConfig.gate.toStdString())
+    {
+        changed = true;
+    }
+	
+	//CLog::info("getNetConfig return. %d\n", changed);
+    qDebug("getNetConfig return. %d\n", changed);
+    return changed;
+}
+
+int NetworkConf::findConfig(const QString& ifname)
+{
+    for (int i = 0; i < (int)m_configs.size(); ++ i)
+    {
+        if (m_configs[i].ifname == ifname)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+bool NetworkConf::findConfig(const QString& ifname, NetworkConfig& config)
+{
+    bool found = false;
+    int index = findConfig(ifname);
+    if (index >= 0)
+    {
+        config = m_configs[index];
+        found = true;
+    }
+    return found;
+}
+
+bool NetworkConf::getConfig(int index, NetworkConfig& config)
+{
+    bool found = false;
+    if (index >= 0 && index < (int)m_configs.size())
+    {
+        config = m_configs[index];
+        found = true;
+    }
+    return found;
+}
+
+NetworkConfig NetworkConf::getConfig(int index)
+{
+    NetworkConfig config = NetworkConfig();
+    if (index >= 0 && index < (int)m_configs.size())
+    {
+        config = m_configs[index];
+    }
+    return config;
+}
+
+void NetworkConf::ensure(size_t count)
+{
+    for (size_t i = 0; i < count; ++ i)
+    {
+        if (m_configs.size() < (i+1))
+        {
+            QString ifname = QString("eth%1").arg(i);
+            NetworkConfig config = NetworkConfig();
+            config.ifname = ifname;
+            config.mask = "255.255.255.0";
+            config.dhcp = false;
+
+            m_configs.push_back(config);
+        }
+    }
+}
+
+void NetworkConf::dump()
+{
+    qDebug("NetworkConf. count: %d\n", m_configs.size());
+	
+	for (size_t i = 0; i < m_configs.size(); ++ i)
+    {
+		const NetworkConfig& config = m_configs[i];
+        
+        qDebug("ifname: %s\n", qPrintable(config.ifname));
+        qDebug("ip: %s\n", qPrintable(config.ip));
+        qDebug("mask: %s\n", qPrintable(config.mask));
+        qDebug("gate: %s\n", qPrintable(config.gate));
+		
+        qDebug("\n");
+    }
+}
+
+void NetworkConf::applyAuxAddrs()
+{
+    std::string ifname = getAuxIfName();
+
+    for (int i = 0; i < MAX_AUX_ADDR; ++ i)
+    {
+        std::string name = comn::StringUtil::format("%s:%d", ifname.c_str(), i);
+        std::string cmd = comn::StringUtil::format("ifconfig %s down\n", name.c_str());
+        qDebug("%s",cmd.c_str());
+        system(cmd.c_str());
+    }
+
+    for (size_t i = 0; i < m_auxAddrs.size(); ++ i)
+    {
+        const AuxNetworkAddr& addr = m_auxAddrs[i];
+        std::string name = comn::StringUtil::format("%s:%d", ifname.c_str(), i);
+        std::string cmd = comn::StringUtil::format("ifconfig %s %s netmask %s up\n", name.c_str(), qPrintable(addr.ip), qPrintable(addr.mask));
+        qDebug("%s",cmd.c_str());
+        system(cmd.c_str());
+    }
+}
+
+std::string NetworkConf::getAuxIfName() const
+{
+    std::string ifname = getAuxInterface();
+    if (m_configs.size() > 0)
+    {
+        ifname = m_configs[0].ifname.toStdString();
+    }
+    return ifname;
+}
+
