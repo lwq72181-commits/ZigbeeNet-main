@@ -30,6 +30,9 @@ int uart_msg_check(uint8_t *pmsg, uint32_t msg_len)
 {
     uint8_t compute_cs = 0;
     uart_proto_head_t *pheader = (uart_proto_head_t *)pmsg;
+    if (msg_len < 2) {
+        return -1;
+    }
     if (pheader->head != CMD_SOURCE_MCU) {
         DT_WLS_ERR("head 0x%.x != 0x%.x\r\n", pheader->head, CMD_SOURCE_MCU);
         return -1;
@@ -137,6 +140,11 @@ void *msg_handle_thread(void *param)
             }
             else
             {
+                int remain = printf_len - i;
+                if (pheader->len < head_offset + tail_offset || pheader->len > (uint32_t)remain) {
+                    i++;
+                    continue;
+                }
                 if (!uart_msg_check(&puart->recv_buff[i], pheader->len)) {
                     memcpy(&header, &puart->recv_buff[i], head_offset);
                     data_len = pheader->len - head_offset - tail_offset;
