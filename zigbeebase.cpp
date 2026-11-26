@@ -30,12 +30,12 @@ int zigbeebase::init(ZIGBEEParam * Param,SensorLogManager *manager)
     /* 文件初始化 */
     dt_file_dir_init();
     /* 内存模块检查初始化 */
-    dt_heap_module_init();
+    //dt_heap_module_init();
     /* 串口模块初始化 */
-    dt_uart_module_init();
+    //dt_uart_module_init();
     /* 无线数据接入模块*/
     DT_PRINTF("dt_wireless_access_init\n");
-    dt_wireless_access_init(m_ZIGBEEParam);
+    //dt_wireless_access_init(m_ZIGBEEParam);
     DT_PRINTF("zigbeebase init over\n");
     setupLogInfo();
     return 0;

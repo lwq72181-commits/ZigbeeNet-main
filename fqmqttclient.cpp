@@ -414,6 +414,7 @@ void QmqttClient::publishStatus()
     QString topic;
     topic = QString("%1/Register/0").arg(m_uploadTopic);
     qDebug("send topic:%s\n",topic.toUtf8().constData());
+    qDebug("register ZGBBoardVer:%s\n", QString::fromUtf8(m_ZIGBEEParam->McuVersion).toUtf8().constData());
     sendMqMessage(topic, obj, 0);
 
 }

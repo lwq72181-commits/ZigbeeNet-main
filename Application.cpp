@@ -15,6 +15,8 @@
 #include "Acquisitiontype.h"
 #include "NetworkConf.h"
 #include "ResolvConf.h"
+#include "zigbee/dt_uart_manager.h"
+#include "zigbee/common.h"
 
 
 Application::Application(int &argc, char **argv):
@@ -42,6 +44,13 @@ Application::Application(int &argc, char **argv):
     }
     else
         bakeLocalParam();
+    dt_heap_module_init();
+    dt_uart_module_init();
+    m_ZIGBEEParam = new ZIGBEEParam();
+    dt_wireless_access_init(m_ZIGBEEParam);
+    system("echo 101 > /sys/class/gpio/export");
+    system("echo out > /sys/class/gpio/gpio101/direction");
+    system("echo 1 > /sys/class/gpio/gpio101/value");
     setupNetwork();
     //setupWpa();
 
@@ -288,7 +297,7 @@ int Application::setupADC()
 
 int Application::setupBlueTooth()
 {
-    m_ZIGBEEParam = new ZIGBEEParam();
+    //m_ZIGBEEParam = new ZIGBEEParam();
     m_ZIGBEEParam->update = 0;
     AppConfig::get("Device/BLTTYName", m_name);
     m_bluetooth = new Buletooth();
