@@ -326,6 +326,237 @@ void QmqttClient::reconnect()
     startMqttTimer();
 }
 
+static QStringList atLines(const QByteArray &resp)
+{
+    QString text = QString::fromLatin1(resp);
+    text.replace('\r', '\n');
+    QStringList raw = text.split('\n');
+    QStringList lines;
+    for (int i = 0; i < raw.size(); ++i) {
+        QString line = raw.at(i).trimmed();
+        if (!line.isEmpty())
+            lines.append(line);
+    }
+    return lines;
+}
+
+static bool atRejected(const QStringList &lines)
+{
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString &line = lines.at(i);
+        if (line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR"))
+            return true;
+    }
+    return false;
+}
+
+static bool atAccepted(const QStringList &lines)
+{
+    if (atRejected(lines))
+        return false;
+    for (int i = 0; i < lines.size(); ++i) {
+        if (lines.at(i) == "OK")
+            return true;
+    }
+    return false;
+}
+
+static bool parseImei(const QByteArray &resp, QString *imei)
+{
+    QStringList lines = atLines(resp);
+    if (!atAccepted(lines))
+        return false;
+    int okAt = -1;
+    for (int i = 0; i < lines.size(); ++i) {
+        if (lines.at(i) == "OK") {
+            okAt = i;
+            break;
+        }
+    }
+    for (int i = okAt - 1; i >= 0; --i) {
+        const QString &line = lines.at(i);
+        if (line.startsWith("AT", Qt::CaseInsensitive) || line.startsWith("+"))
+            continue;
+        if (line.isEmpty())
+            continue;
+        *imei = line;
+        return true;
+    }
+    return false;
+}
+
+static bool parseIccid(const QByteArray &resp, QString *iccid)
+{
+    QStringList lines = atLines(resp);
+    if (!atAccepted(lines))
+        return false;
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString &line = lines.at(i);
+        QString prefix;
+        if (line.startsWith("+QCCID:"))
+            prefix = "+QCCID:";
+        else if (line.startsWith("+CCID:"))
+            prefix = "+CCID:";
+        else
+            continue;
+        QString value = line.mid(prefix.size()).trimmed();
+        if (value.isEmpty())
+            return false;
+        *iccid = value;
+        return true;
+    }
+    return false;
+}
+
+static bool parseCsqRssi(const QByteArray &resp, int *rssi)
+{
+    QStringList lines = atLines(resp);
+    if (!atAccepted(lines))
+        return false;
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString &line = lines.at(i);
+        if (!line.startsWith("+CSQ:"))
+            continue;
+        QString rest = line.mid(QString("+CSQ:").size()).trimmed();
+        int n = 0;
+        int pos = 0;
+        if (rest.isEmpty() || !rest.at(0).isDigit())
+            return false;
+        while (pos < rest.size() && rest.at(pos).isDigit()) {
+            n = n * 10 + rest.at(pos).digitValue();
+            pos++;
+            if (n > 99)
+                return false;
+        }
+        if (!((n >= 0 && n <= 31) || n == 99))
+            return false;
+        *rssi = n;
+        return true;
+    }
+    return false;
+}
+
+static bool parseIwSignal(const QString &text, int *dbm)
+{
+    int mark = text.indexOf("signal:");
+    if (mark < 0)
+        return false;
+    QString rest = text.mid(mark + QString("signal:").size()).trimmed();
+    int pos = 0;
+    int sign = 1;
+    if (pos < rest.size() && (rest.at(pos) == '-' || rest.at(pos) == '+')) {
+        if (rest.at(pos) == '-')
+            sign = -1;
+        pos++;
+    }
+    if (pos >= rest.size() || !rest.at(pos).isDigit())
+        return false;
+    int n = 0;
+    while (pos < rest.size() && rest.at(pos).isDigit()) {
+        n = n * 10 + rest.at(pos).digitValue();
+        pos++;
+    }
+    *dbm = sign * n;
+    return true;
+}
+
+static QString firstRouteDev(const QString &text)
+{
+    QStringList lines = text.split('\n');
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString line = lines.at(i);
+        int devAt = line.indexOf(" dev ");
+        if (devAt < 0)
+            continue;
+        QString rest = line.mid(devAt + 5).trimmed();
+        int sp = rest.indexOf(' ');
+        QString dev = (sp < 0) ? rest : rest.left(sp);
+        if (!dev.isEmpty())
+            return dev;
+    }
+    return QString();
+}
+
+static bool atExchange(uartConfig4g5g *uart, const char *cmd, QByteArray *resp)
+{
+    char cmdBuf[64];
+    int cmdLen = snprintf(cmdBuf, sizeof(cmdBuf), "%s\r\n", cmd);
+    if (cmdLen <= 0 || cmdLen >= (int)sizeof(cmdBuf))
+        return false;
+    if (uart->uart_send_data(cmdBuf, cmdLen) != 0)
+        return false;
+
+    QByteArray acc;
+    for (int i = 0; i < 3; ++i) {
+        char rbuf[256];
+        int n = uart->uart_receive_data(rbuf, (int)sizeof(rbuf), 1);
+        if (n <= 0)
+            break;
+        acc.append(rbuf, n);
+        QStringList lines = atLines(acc);
+        if (atRejected(lines) || atAccepted(lines))
+            break;
+    }
+    if (acc.isEmpty())
+        return false;
+    *resp = acc;
+    return true;
+}
+
+QString QmqttClient::defaultRouteDev() const
+{
+    QProcess process;
+    process.start("ip", QStringList() << "-4" << "route" << "show" << "default");
+    if (!process.waitForStarted(1000))
+        return QString();
+    if (!process.waitForFinished(3000))
+        return QString();
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+        return QString();
+    return firstRouteDev(QString::fromUtf8(process.readAllStandardOutput()));
+}
+
+bool QmqttClient::readWifiSignalDbm(int *dbm) const
+{
+    QProcess process;
+    process.start("iw", QStringList() << "dev" << "wlan0" << "link");
+    if (!process.waitForStarted(1000))
+        return false;
+    if (!process.waitForFinished(3000))
+        return false;
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+        return false;
+    return parseIwSignal(QString::fromUtf8(process.readAllStandardOutput()), dbm);
+}
+
+void QmqttClient::readCellularIdentity(QString *imei, QString *iccid, int *rssi,
+                                       bool *haveImei, bool *haveIccid, bool *haveRssi)
+{
+    *haveImei = false;
+    *haveIccid = false;
+    *haveRssi = false;
+
+    pthread_mutex_lock(&uart_mutex);
+    if (m_uart.init("/dev/ttyUSB2") != 0) {
+        pthread_mutex_unlock(&uart_mutex);
+        qDebug("cellular identity open /dev/ttyUSB2 failed\n");
+        return;
+    }
+
+    QByteArray resp;
+    if (atExchange(&m_uart, "AT+GSN", &resp) && parseImei(resp, imei))
+        *haveImei = true;
+    if (atExchange(&m_uart, "AT+QCCID", &resp) && parseIccid(resp, iccid))
+        *haveIccid = true;
+    if (atExchange(&m_uart, "AT+CSQ", &resp) && parseCsqRssi(resp, rssi))
+        *haveRssi = true;
+
+    m_uart.close_serial_port();
+    pthread_mutex_unlock(&uart_mutex);
+    qDebug("cellular identity imei:%d iccid:%d rssi:%d\n",
+           *haveImei ? 1 : 0, *haveIccid ? 1 : 0, *haveRssi ? *rssi : -1);
+}
+
 void QmqttClient::publishStatus()
 {
 
@@ -338,8 +569,8 @@ void QmqttClient::publishStatus()
 //    config.gate = QString::fromStdString(gate);
 
     QString macAddr;
-    char * ethname;
-    int mid;
+    const char * ethname = NULL;
+    int mid = 0;
     AppConfig::get("Network/NET", mid);
     if(mid == 0)
     {
@@ -358,10 +589,15 @@ void QmqttClient::publishStatus()
         ethname = "rmnet_mhi0.1";
     }
 
-
-    NetworkConf::getMacAddr(ethname, macAddr);
+    QString routeDev = defaultRouteDev();
+    bool wifiUp = (mid == 1 && routeDev == "wlan0");
+    bool cellUp = (mid == 2 && routeDev == "usb0")
+            || (mid == 3 && (routeDev == "rmnet_mhi0.1" || routeDev == "pcie0"));
+    bool macOk = false;
+    if (ethname)
+        macOk = NetworkConf::getMacAddr(ethname, macAddr) && !macAddr.isEmpty();
     net::NetConfig config;
-    if (!net::getNetConfig(ethname, config))
+    if (!ethname || !net::getNetConfig(ethname, config))
     {
         qDebug("getNetConfig eth1 error!!!");
     }
@@ -369,19 +605,47 @@ void QmqttClient::publishStatus()
         qDebug("get ip:%s,gateway:%s,mask:%s\n",config.ip.c_str(),config.gateway.c_str(),config.mask.c_str());
 //    jsonText = JsonCast::toString(config);
 
+    int rssi = 0;
+    QString imei;
+    QString iccid;
+    bool haveImei = false;
+    bool haveIccid = false;
+    if (wifiUp) {
+        int dbm = 0;
+        if (readWifiSignalDbm(&dbm))
+            rssi = dbm;
+        else
+            qDebug("wifi signal read failed\n");
+    } else if (cellUp) {
+        int csq = 0;
+        bool haveRssi = false;
+        readCellularIdentity(&imei, &iccid, &csq, &haveImei, &haveIccid, &haveRssi);
+        if (haveRssi && csq <= 31) {
+            /* AT+CSQ <RSSI> is 0..31, not dBm. dBm = -113 + 2*CSQ (0 -> -113, 31 -> -51). 99 is unknown and stays 0. */
+            rssi = -113 + 2 * csq;
+        }
+    }
+    /* A.3 is 0 ethernet, 1 Wifi, 2 4G/5G. Network/NET 3 is rmnet/pcie. */
+    int connType = (mid == 3) ? 2 : mid;
+
     QJsonObject obj;
     obj.insert("Ver", AppConst::getVersion());
     obj.insert("Code", m_devID);
-    obj.insert("Mac", macAddr);
+    if (wifiUp) {
+        if (macOk)
+            obj.insert("Mac", macAddr);
+    } else if (ethname) {
+        obj.insert("Mac", macAddr);
+    }
     obj.insert("SN", m_devID);
     obj.insert("LocalIp", QString::fromStdString(config.ip));
     obj.insert("ServerIp", m_mqUrl);
     obj.insert("GateWay", QString::fromStdString(config.gateway));
     obj.insert("SubnetMask", QString::fromStdString(config.mask));
     obj.insert("ServerPort", m_port);
-    obj.insert("ConnType", mid);
+    obj.insert("ConnType", connType);
     obj.insert("DasType", 20);
-    obj.insert("RSSI", 0);
+    obj.insert("RSSI", rssi);
 //    int mid;
     AppConfig::get("Device/zgbFreqBand", mid);
     obj.insert("Channel", mid/*m_param->channel*/);
@@ -392,7 +656,11 @@ void QmqttClient::publishStatus()
     versionh.insert("Code", 1);
     versionh.insert("AppVer", AppConst::getVersion());
     versionh.insert("HardVer", "V1.0.0");
+    if (haveImei)
+        versionh.insert("IMEI", imei);
     versionh.insert("ZGBBoardVer", QString::fromUtf8(m_ZIGBEEParam->McuVersion));
+    if (haveIccid)
+        versionh.insert("ICCID", iccid);
 //    versions.insert("AppVer", "V1.0.0");
 //    versions.insert("HardVer", "");
 //    versions.insert("Code", 5);

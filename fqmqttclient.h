@@ -32,6 +32,10 @@ protected:
     void reconnect();
     void reconnect(int time);
     void publishStatus();
+    QString defaultRouteDev() const;
+    bool readWifiSignalDbm(int *dbm) const;
+    void readCellularIdentity(QString *imei, QString *iccid, int *rssi,
+                              bool *haveImei, bool *haveIccid, bool *haveRssi);
     void startTimeOutTimer();
     void stopTimeOutTimer();
     void onTimeOutTimer();
