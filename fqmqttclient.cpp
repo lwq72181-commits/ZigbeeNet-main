@@ -821,6 +821,58 @@ int QmqttClient::setupzigbeeparam()
     return 0;
 }
 
+static void consider_collect_para_threshold(const QJsonObject &obj,
+                                           trigger_threshold_entry_t *items,
+                                           int *count)
+{
+    trigger_threshold_entry_t item;
+
+    if (*count >= MAX_SENSOR_CNT)
+        return;
+    if (!obj.contains("threshold") || obj.value("threshold").isNull())
+        return;
+
+    item.sensor_sn = 0;
+    item.channel = 0;
+    item.threshold = static_cast<float>(obj.value("threshold").toDouble());
+    if (obj.contains("sensor_sn") && !obj.value("sensor_sn").isNull())
+        item.sensor_sn = obj.value("sensor_sn").toInt();
+    else if (obj.contains("ChNo") && !obj.value("ChNo").isNull())
+        item.channel = obj.value("ChNo").toInt();
+
+    if (item.sensor_sn <= 0 && (item.channel < 1 || item.channel > TRIGGER_THRESHOLD_SLOTS))
+        return;
+
+    items[*count] = item;
+    *count += 1;
+}
+
+/* CollectPara key "threshold" is the trigger value, in g.
+ * On the 2026-11-26 sample that key sits on each TriggerList element
+ * next to sensor_sn. A value with no sensor_sn and no ChNo is not stored. */
+static void store_collect_para_thresholds(const QJsonObject &root)
+{
+    trigger_threshold_entry_t items[MAX_SENSOR_CNT];
+    int count = 0;
+    const QStringList keys = root.keys();
+
+    consider_collect_para_threshold(root, items, &count);
+    for (int i = 0; i < keys.size(); ++i) {
+        const QJsonValue value = root.value(keys.at(i));
+        if (value.isArray()) {
+            const QJsonArray arr = value.toArray();
+            for (int j = 0; j < arr.size(); ++j) {
+                if (arr.at(j).isObject())
+                    consider_collect_para_threshold(arr.at(j).toObject(), items, &count);
+            }
+        } else if (value.isObject()) {
+            consider_collect_para_threshold(value.toObject(), items, &count);
+        }
+    }
+    trigger_threshold_replace(items, count);
+    qDebug("collect para threshold count:%d\n", count);
+}
+
 void QmqttClient::on_messageReceived(const QByteArray &message, const QMqttTopicName &topic)
 {
     QJsonDocument doc = QJsonDocument::fromJson(message);
@@ -997,6 +1049,7 @@ void QmqttClient::on_messageReceived(const QByteArray &message, const QMqttTopic
             {
                 m_pos = 4;
                 QJsonObject json = doc.object();
+                store_collect_para_thresholds(json);
                 QJsonArray Vibarr = json["VibChannelList"].toArray();//VibChannelList
                 QJsonArray Techarr = json["TechChannelPara"].toArray();
                 QJsonArray Speedarr = json["SpeedChannelPara"].toArray();

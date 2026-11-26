@@ -133,6 +133,18 @@ int mpu_set_param_info_Band(int zgbFreqBand);
 int dt_check_spi_nor_module(void);
 int read_wsl_syspara();
 int config_zgb_syspara();
+
+/* One server threshold. sensor_sn > 0 matches the bind-table SN.
+ * sensor_sn == 0 and channel in 1..TRIGGER_THRESHOLD_SLOTS matches that channel,
+ * and only if the bind table has a sensor SN on it. */
+typedef struct {
+    int   sensor_sn;
+    int   channel;
+    float threshold;
+} trigger_threshold_entry_t;
+
+void trigger_threshold_replace(const trigger_threshold_entry_t *items, int count);
+void trigger_threshold_fill(float out[TRIGGER_THRESHOLD_SLOTS]);
 #ifdef __cplusplus
 }
 #endif

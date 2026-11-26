@@ -159,6 +159,11 @@ static int get_system_time_task(uint8_t *pdata, uint32_t len)
     time_t seconds = time(NULL);
     int now = seconds;
     memcpy(reply.SystemTime,&now,4);
+    {
+        float trigger_g[TRIGGER_THRESHOLD_SLOTS];
+        trigger_threshold_fill(trigger_g);
+        memcpy(reply.TriggerThreshold, trigger_g, sizeof(reply.TriggerThreshold));
+    }
 //    DT_WLS_LOG("systime: %hhd%hhd_%hhd_%hhd: %hhd:%hhd:%hhd\r\n",
 //    reply.SystemTime[0],reply.SystemTime[1], reply.SystemTime[2],
 //    reply.SystemTime[3],reply.SystemTime[4], reply.SystemTime[5],reply.SystemTime[6]);
