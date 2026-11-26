@@ -100,6 +100,8 @@ typedef struct {
 }__attribute__((packed)) uart_cmd_0x01_ret_t;
 
 /* cmd: 0x20 */
+#define TRIGGER_THRESHOLD_SLOTS     30
+#define TRIGGER_THRESHOLD_DEFAULT_G 5.0f
 #define TASK_GET_SYSTEM_TIME        0x01
 #define TASK_GET_560G_PARAMETER     0x02
 #define TASK_GET_UPGRADE_VERSION    0x03
@@ -112,6 +114,8 @@ typedef struct {
     unsigned char           TaskType;
     unsigned char           RunState;
     unsigned char           SystemTime[7];
+    /* unit g. index 0 is channel 1. omitted server values stay at 5. */
+    float                   TriggerThreshold[TRIGGER_THRESHOLD_SLOTS];
     uart_proto_tail_t       tailer;
 }__attribute__((packed)) uart_cmd_0x20_get_system_time_ret_t;
 

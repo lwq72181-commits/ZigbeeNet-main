@@ -990,3 +990,88 @@ int dt_check_spi_nor_module(void)
     }
     return DT_EOK;
 }
+
+static pthread_mutex_t g_trigger_threshold_mutex = PTHREAD_MUTEX_INITIALIZER;
+static trigger_threshold_entry_t g_trigger_threshold[MAX_SENSOR_CNT];
+static int g_trigger_threshold_count;
+
+static int trigger_threshold_sensor_sn(const uart_cmd_ret_sensor_info_t *sensor)
+{
+    char sn_text[11];
+
+    if (sensor == NULL)
+        return 0;
+    memcpy(sn_text, sensor->Sn, 10);
+    sn_text[10] = '\0';
+    return atoi(sn_text);
+}
+
+void trigger_threshold_replace(const trigger_threshold_entry_t *items, int count)
+{
+    if (count < 0)
+        count = 0;
+    if (count > MAX_SENSOR_CNT)
+        count = MAX_SENSOR_CNT;
+
+    pthread_mutex_lock(&g_trigger_threshold_mutex);
+    memset(g_trigger_threshold, 0, sizeof(g_trigger_threshold));
+    if (items != NULL && count > 0)
+        memcpy(g_trigger_threshold, items, (size_t)count * sizeof(g_trigger_threshold[0]));
+    g_trigger_threshold_count = count;
+    pthread_mutex_unlock(&g_trigger_threshold_mutex);
+    DT_WLS_LOG("server trigger threshold count:%d\r\n", count);
+}
+
+void trigger_threshold_fill(float out[TRIGGER_THRESHOLD_SLOTS])
+{
+    trigger_threshold_entry_t local[MAX_SENSOR_CNT];
+    int count;
+    int applied = 0;
+    int pass;
+    ZIGBEEParam *param;
+
+    for (int i = 0; i < TRIGGER_THRESHOLD_SLOTS; i++)
+        out[i] = TRIGGER_THRESHOLD_DEFAULT_G;
+
+    pthread_mutex_lock(&g_trigger_threshold_mutex);
+    count = g_trigger_threshold_count;
+    if (count < 0)
+        count = 0;
+    if (count > MAX_SENSOR_CNT)
+        count = MAX_SENSOR_CNT;
+    if (count > 0)
+        memcpy(local, g_trigger_threshold, (size_t)count * sizeof(local[0]));
+    pthread_mutex_unlock(&g_trigger_threshold_mutex);
+
+    param = getSharedData();
+    if (param == NULL || count == 0)
+        return;
+
+    /* Pass 0 writes channel-only values. Pass 1 lets a sensor SN win. */
+    for (pass = 0; pass < 2; pass++) {
+        for (int j = 0; j < count; j++) {
+            int by_sn = local[j].sensor_sn > 0;
+            if ((pass == 0 && by_sn) || (pass == 1 && !by_sn))
+                continue;
+            for (int i = 0; i < MAX_SENSOR_CNT; i++) {
+                uart_cmd_ret_sensor_info_t *sensor = &param->sensor_info[i];
+                int channel = sensor->Channel;
+                int sn = trigger_threshold_sensor_sn(sensor);
+                if (channel < 1 || channel > TRIGGER_THRESHOLD_SLOTS || sn <= 0)
+                    continue;
+                if (by_sn) {
+                    if (sn == local[j].sensor_sn)
+                        out[channel - 1] = local[j].threshold;
+                } else if (channel == local[j].channel) {
+                    out[channel - 1] = local[j].threshold;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < TRIGGER_THRESHOLD_SLOTS; i++) {
+        if (out[i] != TRIGGER_THRESHOLD_DEFAULT_G)
+            applied++;
+    }
+    DT_WLS_LOG("0x20 trigger slots set:%d default:%g\r\n", applied, TRIGGER_THRESHOLD_DEFAULT_G);
+}
